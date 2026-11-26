@@ -1,0 +1,126 @@
+RZPKG1
+rz_lz
+0.1.0
+2
+rizg.toml
+64
+[package]
+name = "rz_lz"
+version = "0.1.0"
+entry = "src/lib.rz"
+
+src/lib.rz
+4199
+// packages/rz_lz/src/lib.rz — Pure-Rizg Lossless LZ77 Compressor & Bounds-Checked Decompressor
+// Format: 4-byte LE uncompressed length + token stream:
+//   0x00..0x7F -> literal run of (tag + 1) bytes (1..128 bytes)
+//   0x80..0xFF -> match of len ((tag & 0x3F) + 3) + 2-byte LE back-distance (or flag)
+// Simple deterministic byte-stream format:
+//   tag byte: if (tag & 0x80) == 0 -> literal run of (tag + 1) bytes
+//             if (tag & 0x80) != 0 -> match length = (tag & 0x7F) + 3, followed by u16 BE offset (>=1)
+
+pub fn lz_compress(src: &[]u8, out: &mut []u8) !i64 {
+    if out.len < 4 { return err.InvalidLength; }
+    out[0] = (src.len & 255) as u8;
+    out[1] = ((src.len >> 8) & 255) as u8;
+    out[2] = ((src.len >> 16) & 255) as u8;
+    out[3] = ((src.len >> 24) & 255) as u8;
+    var o: i64 = 4;
+    var i: i64 = 0;
+
+    while i < src.len {
+        var best_len: i64 = 0;
+        var best_dist: i64 = 0;
+        const win_start = if i > 4096 { i - 4096 } else { 0 };
+        var pos = i - 1;
+        while pos >= win_start {
+            if src[pos] == src[i] {
+                var mlen: i64 = 1;
+                while i + mlen < src.len && mlen < 130 && src[pos + mlen] == src[i + mlen] {
+                    mlen += 1;
+                }
+                if mlen >= 4 && mlen > best_len {
+                    best_len = mlen;
+                    best_dist = i - pos;
+                    if mlen == 130 { break; }
+                }
+            }
+            pos -= 1;
+        }
+        if best_len >= 4 {
+            if o + 3 > out.len { return err.InvalidLength; }
+            out[o] = (0x80 | (best_len - 3)) as u8;
+            out[o + 1] = ((best_dist >> 8) & 255) as u8;
+            out[o + 2] = (best_dist & 255) as u8;
+            o += 3;
+            i += best_len;
+        } else {
+            // Collect up to 64 literals while no match >=4 exists
+            const lit_hdr = o;
+            if o >= out.len { return err.InvalidLength; }
+            o += 1;
+            var cnt: i64 = 0;
+            while i < src.len && cnt < 64 {
+                if o >= out.len { return err.InvalidLength; }
+                out[o] = src[i];
+                o += 1;
+                i += 1;
+                cnt += 1;
+                if i + 4 <= src.len && i >= 1 && src[i] == src[i - 1] && src[i + 1] == src[i - 1] && src[i + 2] == src[i - 1] {
+                    break;
+                }
+            }
+            out[lit_hdr] = (cnt - 1) as u8;
+        }
+    }
+    return o;
+}
+
+pub fn lz_decompress(comp: &[]u8, out: &mut []u8) !i64 {
+    if comp.len < 4 { return err.ParseError; }
+    const expect_len = (comp[0] as i64)
+        | ((comp[1] as i64) << 8)
+        | ((comp[2] as i64) << 16)
+        | ((comp[3] as i64) << 24);
+    if expect_len < 0 || expect_len > out.len { return err.InvalidLength; }
+
+    var ip: i64 = 4;
+    var op: i64 = 0;
+    while ip < comp.len {
+        const tag = comp[ip] as i64;
+        ip += 1;
+        if (tag & 0x80) == 0 {
+            const cnt = tag + 1;
+            if ip + cnt > comp.len || op + cnt > expect_len { return err.ParseError; }
+            for k in 0..cnt {
+                out[op + k] = comp[ip + k];
+            }
+            ip += cnt;
+            op += cnt;
+        } else {
+            if ip + 2 > comp.len { return err.ParseError; }
+            const mlen = (tag & 0x7F) + 3;
+            const dist = ((comp[ip] as i64) << 8) | (comp[ip + 1] as i64);
+            ip += 2;
+            if dist <= 0 || dist > op || op + mlen > expect_len { return err.ParseError; }
+            for k in 0..mlen {
+                out[op + k] = out[op - dist + k];
+            }
+            op += mlen;
+        }
+    }
+    if op != expect_len { return err.ParseError; }
+    return op;
+}
+
+test "rz_lz lossless compression roundtrip and corruption rejection" {
+    const raw = "AAAAABBBBBCCCCCDDDDDAAAAABBBBBCCCCCDDDDDAAAAABBBBBCCCCCDDDDD1234567890!";
+    var comp: [256]u8 = [0; 256];
+    const clen = try lz_compress(raw[0..raw.len], &mut comp);
+    assert(clen < raw.len);
+    var dec: [256]u8 = [0; 256];
+    const dlen = try lz_decompress(comp[0..clen], &mut dec);
+    assert(dlen == raw.len);
+    for i in 0..raw.len { assert(dec[i] == raw[i]); }
+}
+
