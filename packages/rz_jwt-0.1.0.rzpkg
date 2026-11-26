@@ -1,0 +1,174 @@
+RZPKG1
+rz_jwt
+0.1.0
+2
+rizg.toml
+65
+[package]
+name = "rz_jwt"
+version = "0.1.0"
+entry = "src/lib.rz"
+
+src/lib.rz
+6008
+// packages/rz_jwt/src/lib.rz — Pure-Rizg Base64URL + JWT HS256 & EdDSA Sign/Verify
+import "std/crypto/hmac.rz";
+import "std/crypto/ed25519.rz";
+
+fn b64url_encode_at(src: &[]u8, out: &mut []u8, off: i64) !i64 {
+    const tbl = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    var i: i64 = 0;
+    var o: i64 = off;
+    while i < src.len {
+        const b0 = src[i] as u32;
+        const has1 = i + 1 < src.len;
+        const has2 = i + 2 < src.len;
+        const b1 = if has1 { src[i + 1] as u32 } else { 0 as u32 };
+        const b2 = if has2 { src[i + 2] as u32 } else { 0 as u32 };
+        const v = (b0 << (16 as u32)) | (b1 << (8 as u32)) | b2;
+        if o + 2 > out.len { return err.InvalidLength; }
+        out[o] = tbl[((v >> (18 as u32)) & (63 as u32)) as i64]; o += 1;
+        out[o] = tbl[((v >> (12 as u32)) & (63 as u32)) as i64]; o += 1;
+        if has1 {
+            if o >= out.len { return err.InvalidLength; }
+            out[o] = tbl[((v >> (6 as u32)) & (63 as u32)) as i64]; o += 1;
+        }
+        if has2 {
+            if o >= out.len { return err.InvalidLength; }
+            out[o] = tbl[(v & (63 as u32)) as i64]; o += 1;
+        }
+        i += 3;
+    }
+    return o - off;
+}
+
+pub fn b64url_encode(src: &[]u8, out: &mut []u8) !i64 {
+    return try b64url_encode_at(src, out, 0);
+}
+
+fn b64url_val(c: u8) i64 {
+    if c >= ('A' as u8) && c <= ('Z' as u8) { return (c - ('A' as u8)) as i64; }
+    if c >= ('a' as u8) && c <= ('z' as u8) { return ((c - ('a' as u8)) as i64) + 26; }
+    if c >= ('0' as u8) && c <= ('9' as u8) { return ((c - ('0' as u8)) as i64) + 52; }
+    if c == ('-' as u8) { return 62; }
+    if c == ('_' as u8) { return 63; }
+    return -1;
+}
+
+pub fn b64url_decode(src: &[]u8, out: &mut []u8) !i64 {
+    var acc: i64 = 0;
+    var bits: i64 = 0;
+    var o: i64 = 0;
+    for i in 0..src.len {
+        if src[i] == ('=' as u8) { break; }
+        const v = b64url_val(src[i]);
+        if v < 0 { return err.ParseError; }
+        acc = (acc << 6) | v;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            if o >= out.len { return err.InvalidLength; }
+            out[o] = ((acc >> bits) & 255) as u8;
+            o += 1;
+        }
+    }
+    return o;
+}
+
+fn jwt_write_signing_input(hdr: str, payload: &[]u8, out: &mut []u8) !i64 {
+    const h_len = try b64url_encode(hdr[0..hdr.len], out);
+    if h_len >= out.len { return err.InvalidLength; }
+    out[h_len] = '.' as u8;
+    const p_len = try b64url_encode_at(payload, out, h_len + 1);
+    return h_len + 1 + p_len;
+}
+
+pub fn jwt_sign_hs256(key: &secret []u8, payload: &[]u8, out_tok: &mut []u8) !i64 {
+    const hdr = "{\"alg\":\"HS256\",\"typ\":\"JWT\"}";
+    const si_len = try jwt_write_signing_input(hdr, payload, out_tok);
+    var mac: [32]u8 = [0; 32];
+    try hmac_sha256(key, out_tok[0..si_len], &mut mac);
+    if si_len >= out_tok.len { return err.InvalidLength; }
+    out_tok[si_len] = '.' as u8;
+    const s_len = try b64url_encode_at(&mac, out_tok, si_len + 1);
+    return si_len + 1 + s_len;
+}
+
+pub fn jwt_verify_hs256(key: &secret []u8, tok: &[]u8, out_payload: &mut []u8) !i64 {
+    var d1: i64 = -1;
+    var d2: i64 = -1;
+    for i in 0..tok.len {
+        if tok[i] == ('.' as u8) {
+            if d1 < 0 { d1 = i; }
+            else if d2 < 0 { d2 = i; }
+            else { return err.ParseError; }
+        }
+    }
+    if d1 <= 0 || d2 <= d1 + 1 || d2 + 1 >= tok.len { return err.ParseError; }
+    var sig: [64]u8 = [0; 64];
+    const sig_len = try b64url_decode(tok[d2 + 1..tok.len], &mut sig);
+    if sig_len != 32 { return err.AuthFailed; }
+    if !(try hmac_sha256_verify(key, tok[0..d2], sig[0..32])) {
+        return err.AuthFailed;
+    }
+    return try b64url_decode(tok[d1 + 1..d2], out_payload);
+}
+
+pub fn jwt_sign_eddsa(seed32: &secret []u8, pk32: &[]u8, payload: &[]u8, out_tok: &mut []u8) !i64 {
+    const hdr = "{\"alg\":\"EdDSA\",\"typ\":\"JWT\"}";
+    const si_len = try jwt_write_signing_input(hdr, payload, out_tok);
+    var sig: [64]u8 = [0; 64];
+    try ed25519_sign(seed32, pk32, out_tok[0..si_len], &mut sig);
+    if si_len >= out_tok.len { return err.InvalidLength; }
+    out_tok[si_len] = '.' as u8;
+    const s_len = try b64url_encode_at(&sig, out_tok, si_len + 1);
+    return si_len + 1 + s_len;
+}
+
+pub fn jwt_verify_eddsa(pk32: &[]u8, tok: &[]u8, out_payload: &mut []u8) !i64 {
+    var d1: i64 = -1;
+    var d2: i64 = -1;
+    for i in 0..tok.len {
+        if tok[i] == ('.' as u8) {
+            if d1 < 0 { d1 = i; }
+            else if d2 < 0 { d2 = i; }
+            else { return err.ParseError; }
+        }
+    }
+    if d1 <= 0 || d2 <= d1 + 1 || d2 + 1 >= tok.len { return err.ParseError; }
+    var sig: [96]u8 = [0; 96];
+    const sig_len = try b64url_decode(tok[d2 + 1..tok.len], &mut sig);
+    if sig_len != 64 { return err.AuthFailed; }
+    if !ed25519_verify(pk32, tok[0..d2], sig[0..64]) {
+        return err.AuthFailed;
+    }
+    return try b64url_decode(tok[d1 + 1..d2], out_payload);
+}
+
+test "rz_jwt HS256 & EdDSA sign/verify and fail-closed tamper rejection" {
+    var k = try alloc_secret(u8, 32);
+    defer zeroize_free(k);
+    for i in 0..32 { k[i] = (i + 7) as u8; }
+    const claims = "{\"sub\":\"rizg\",\"exp\":2000000000}";
+    var tok: [512]u8 = [0; 512];
+    const tlen = try jwt_sign_hs256(&k, claims[0..claims.len], &mut tok);
+    var decoded: [256]u8 = [0; 256];
+    const plen = try jwt_verify_hs256(&k, tok[0..tlen], &mut decoded);
+    assert(plen == claims.len);
+    // Tamper signature byte
+    tok[tlen - 2] = tok[tlen - 2] ^ (1 as u8);
+    var rejected = false;
+    const _fail = jwt_verify_hs256(&k, tok[0..tlen], &mut decoded) catch {
+        rejected = true;
+        0
+    };
+    assert(rejected);
+
+    // EdDSA roundtrip
+    var pk: [32]u8 = [0; 32];
+    try ed25519_keypair_from_seed(&k, &mut pk);
+    const tlen2 = try jwt_sign_eddsa(&k, &pk, claims[0..claims.len], &mut tok);
+    const plen2 = try jwt_verify_eddsa(&pk, tok[0..tlen2], &mut decoded);
+    assert(plen2 == claims.len);
+}
+
