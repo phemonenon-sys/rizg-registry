@@ -1,0 +1,128 @@
+RZPKG1
+rz_csv
+0.1.0
+2
+rizg.toml
+65
+[package]
+name = "rz_csv"
+version = "0.1.0"
+entry = "src/lib.rz"
+
+src/lib.rz
+3437
+// packages/rz_csv/src/lib.rz — Pure-Rizg RFC 4180 CSV Row & Cell Parser (handles quotes & `""` escapes)
+pub fn csv_row_count(data: &[]u8) i64 {
+    var rows: i64 = 0;
+    var i: i64 = 0;
+    var in_q = false;
+    var has_content = false;
+    while i < data.len {
+        const b = data[i];
+        if in_q {
+            if b == ('"' as u8) {
+                if i + 1 < data.len && data[i + 1] == ('"' as u8) {
+                    i += 2;
+                    continue;
+                }
+                in_q = false;
+            }
+            has_content = true;
+        } else {
+            if b == ('"' as u8) {
+                in_q = true;
+                has_content = true;
+            } else if b == ('\n' as u8) {
+                if has_content { rows += 1; }
+                has_content = false;
+            } else if b != ('\r' as u8) {
+                has_content = true;
+            }
+        }
+        i += 1;
+    }
+    if has_content { rows += 1; }
+    return rows;
+}
+
+pub fn csv_cell(data: &[]u8, target_row: i64, target_col: i64, out: &mut []u8) !i64 {
+    var row: i64 = 0;
+    var col: i64 = 0;
+    var i: i64 = 0;
+    var in_q = false;
+    var olen: i64 = 0;
+    var matched = row == target_row && col == target_col;
+
+    while i < data.len {
+        const b = data[i];
+        if in_q {
+            if b == ('"' as u8) {
+                if i + 1 < data.len && data[i + 1] == ('"' as u8) {
+                    if matched {
+                        if olen >= out.len { return err.InvalidLength; }
+                        out[olen] = '"' as u8;
+                        olen += 1;
+                    }
+                    i += 2;
+                    continue;
+                }
+                in_q = false;
+                i += 1;
+                continue;
+            }
+            if matched {
+                if olen >= out.len { return err.InvalidLength; }
+                out[olen] = b;
+                olen += 1;
+            }
+            i += 1;
+            continue;
+        }
+
+        if b == ('"' as u8) {
+            in_q = true;
+            i += 1;
+            continue;
+        }
+        if b == (',' as u8) {
+            if matched { return olen; }
+            col += 1;
+            matched = row == target_row && col == target_col;
+            i += 1;
+            continue;
+        }
+        if b == ('\r' as u8) {
+            i += 1;
+            continue;
+        }
+        if b == ('\n' as u8) {
+            if matched { return olen; }
+            row += 1;
+            col = 0;
+            matched = row == target_row && col == target_col;
+            i += 1;
+            continue;
+        }
+        if matched {
+            if olen >= out.len { return err.InvalidLength; }
+            out[olen] = b;
+            olen += 1;
+        }
+        i += 1;
+    }
+    if matched { return olen; }
+    return -1;
+}
+
+test "rz_csv handles RFC 4180 quoted commas and escaped quotes" {
+    const csv = "id,name,note\n1,\"Ada, Lovelace\",\"says \"\"hi\"\"\"\n2,Bob,plain\n";
+    assert(csv_row_count(csv[0..csv.len]) == 3);
+    var cell: [64]u8 = [0; 64];
+    const n1 = try csv_cell(csv[0..csv.len], 1, 1, &mut cell);
+    assert(n1 == 13 && cell[3] == (',' as u8));
+    const n2 = try csv_cell(csv[0..csv.len], 1, 2, &mut cell);
+    assert(n2 == 9 && cell[5] == ('"' as u8));
+    const n3 = try csv_cell(csv[0..csv.len], 2, 1, &mut cell);
+    assert(n3 == 3 && cell[0] == ('B' as u8) && cell[2] == ('b' as u8));
+}
+
