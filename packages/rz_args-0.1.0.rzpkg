@@ -1,0 +1,97 @@
+RZPKG1
+rz_args
+0.1.0
+2
+rizg.toml
+66
+[package]
+name = "rz_args"
+version = "0.1.0"
+entry = "src/lib.rz"
+
+src/lib.rz
+2525
+// packages/rz_args/src/lib.rz — Pure-Rizg CLI Argument & Flag Parser
+fn eq_str(a: str, b: str) bool {
+    if a.len != b.len { return false; }
+    for i in 0..a.len {
+        if a[i] != b[i] { return false; }
+    }
+    return true;
+}
+
+fn eq_slice_str(a: &[]u8, b: str) bool {
+    if a.len != b.len { return false; }
+    for i in 0..a.len {
+        if a[i] != b[i] { return false; }
+    }
+    return true;
+}
+
+pub fn slice_has_flag(argv: &[]str, flag: str) bool {
+    for i in 0..argv.len {
+        const a = argv[i];
+        if eq_str(a, flag) {
+            return true;
+        }
+    }
+    return false;
+}
+
+pub fn slice_opt_value(argv: &[]str, flag: str, out: &mut []u8) !i64 {
+    var i: i64 = 0;
+    while i < argv.len {
+        const a = argv[i];
+        if eq_str(a, flag) && i + 1 < argv.len {
+            const v = argv[i + 1];
+            if v.len > out.len { return err.InvalidLength; }
+            for k in 0..v.len { out[k] = v[k]; }
+            return v.len;
+        }
+        // Also support --flag=value
+        if a.len > flag.len + 1 && eq_slice_str(a[0..flag.len], flag) && a[flag.len] == ('=' as u8) {
+            const vlen = a.len - (flag.len + 1);
+            if vlen > out.len { return err.InvalidLength; }
+            for k in 0..vlen { out[k] = a[flag.len + 1 + k]; }
+            return vlen;
+        }
+        i += 1;
+    }
+    return -1;
+}
+
+pub fn slice_opt_i64(argv: &[]str, flag: str, default_val: i64) i64 {
+    var tmp: [64]u8 = [0; 64];
+    const n = slice_opt_value(argv, flag, &mut tmp) catch -1;
+    if n <= 0 { return default_val; }
+    var neg = false;
+    var i: i64 = 0;
+    if tmp[0] == ('-' as u8) { neg = true; i = 1; }
+    if i >= n { return default_val; }
+    var acc: i64 = 0;
+    while i < n {
+        if tmp[i] < ('0' as u8) || tmp[i] > ('9' as u8) { return default_val; }
+        acc = acc * 10 + ((tmp[i] - ('0' as u8)) as i64);
+        i += 1;
+    }
+    return if neg { -acc } else { acc };
+}
+
+pub fn has_flag(flag: str) bool {
+    const n = args_count();
+    for i in 1..n {
+        const a = arg_at(i);
+        if eq_str(a, flag) { return true; }
+    }
+    return false;
+}
+
+test "rz_args parses flags, key=val, and integers" {
+    var argv: [5]str = ["prog", "--verbose", "--port=8080", "--workers", "4"];
+    assert(slice_has_flag(&argv, "--verbose"));
+    assert(!slice_has_flag(&argv, "--missing"));
+    assert(slice_opt_i64(&argv, "--port", 80) == 8080);
+    assert(slice_opt_i64(&argv, "--workers", 1) == 4);
+    assert(slice_opt_i64(&argv, "--timeout", 30) == 30);
+}
+
