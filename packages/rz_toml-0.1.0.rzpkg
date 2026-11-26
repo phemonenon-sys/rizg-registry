@@ -1,0 +1,128 @@
+RZPKG1
+rz_toml
+0.1.0
+2
+rizg.toml
+66
+[package]
+name = "rz_toml"
+version = "0.1.0"
+entry = "src/lib.rz"
+
+src/lib.rz
+4367
+// packages/rz_toml/src/lib.rz — Pure-Rizg Section-Aware TOML/INI Config Reader
+fn trim_bounds(src: &[]u8, start_in: i64, end_in: i64) (i64, i64) {
+    var s = start_in;
+    var e = end_in;
+    while s < e && (src[s] == (' ' as u8) || src[s] == ('\t' as u8) || src[s] == ('\r' as u8)) {
+        s += 1;
+    }
+    while e > s && (src[e - 1] == (' ' as u8) || src[e - 1] == ('\t' as u8) || src[e - 1] == ('\r' as u8)) {
+        e -= 1;
+    }
+    return (s, e);
+}
+
+fn eq_slice_str(src: &[]u8, s: i64, e: i64, target: str) bool {
+    if e - s != target.len { return false; }
+    for i in 0..target.len {
+        if src[s + i] != target[i] { return false; }
+    }
+    return true;
+}
+
+fn find_toml_value(doc: &[]u8, section: str, key: str) (i64, i64) {
+    var cur_sec_start: i64 = 0;
+    var cur_sec_end: i64 = 0;
+    var pos: i64 = 0;
+    const n = doc.len;
+    while pos < n {
+        var lend = pos;
+        while lend < n && doc[lend] != ('\n' as u8) { lend += 1; }
+        // Strip outside-quote comments
+        var cend = pos;
+        var in_q = false;
+        while cend < lend {
+            if doc[cend] == ('"' as u8) { in_q = !in_q; }
+            if !in_q && doc[cend] == ('#' as u8) { break; }
+            cend += 1;
+        }
+        const (ls, le) = trim_bounds(doc, pos, cend);
+        if le > ls {
+            if doc[ls] == ('[' as u8) && doc[le - 1] == (']' as u8) {
+                const (ss, se) = trim_bounds(doc, ls + 1, le - 1);
+                cur_sec_start = ss;
+                cur_sec_end = se;
+            } else {
+                var eq_i: i64 = -1;
+                for k in ls..le {
+                    if doc[k] == ('=' as u8) { eq_i = k; break; }
+                }
+                if eq_i > ls {
+                    const sec_match = if section.len == 0 {
+                        cur_sec_end == cur_sec_start
+                    } else {
+                        eq_slice_str(doc, cur_sec_start, cur_sec_end, section)
+                    };
+                    if sec_match {
+                        const (ks, ke) = trim_bounds(doc, ls, eq_i);
+                        if eq_slice_str(doc, ks, ke, key) {
+                            const (vs, ve) = trim_bounds(doc, eq_i + 1, le);
+                            if ve - vs >= 2 && doc[vs] == ('"' as u8) && doc[ve - 1] == ('"' as u8) {
+                                return (vs + 1, ve - 1);
+                            }
+                            return (vs, ve);
+                        }
+                    }
+                }
+            }
+        }
+        pos = lend + 1;
+    }
+    return (-1, -1);
+}
+
+pub fn toml_get_str(doc: &[]u8, section: str, key: str, out: &mut []u8) !i64 {
+    const (vs, ve) = find_toml_value(doc, section, key);
+    if vs < 0 { return -1; }
+    const vlen = ve - vs;
+    if vlen > out.len { return err.InvalidLength; }
+    for i in 0..vlen { out[i] = doc[vs + i]; }
+    return vlen;
+}
+
+pub fn toml_get_i64(doc: &[]u8, section: str, key: str, default_val: i64) i64 {
+    const (vs, ve) = find_toml_value(doc, section, key);
+    if vs < 0 || ve <= vs { return default_val; }
+    var neg = false;
+    var i = vs;
+    if doc[i] == ('-' as u8) { neg = true; i += 1; }
+    if i >= ve { return default_val; }
+    var acc: i64 = 0;
+    while i < ve {
+        if doc[i] < ('0' as u8) || doc[i] > ('9' as u8) { return default_val; }
+        acc = acc * 10 + ((doc[i] - ('0' as u8)) as i64);
+        i += 1;
+    }
+    return if neg { -acc } else { acc };
+}
+
+pub fn toml_get_bool(doc: &[]u8, section: str, key: str, default_val: bool) bool {
+    const (vs, ve) = find_toml_value(doc, section, key);
+    if vs < 0 { return default_val; }
+    if eq_slice_str(doc, vs, ve, "true") { return true; }
+    if eq_slice_str(doc, vs, ve, "false") { return false; }
+    return default_val;
+}
+
+test "rz_toml parses sections, strings, ints, bools, and ignores comments" {
+    const cfg = "[package]\nname = \"rizg-demo\" # inline comment\nworkers = 8\nhardened = true\n[net]\nport = 8443\n";
+    var buf: [64]u8 = [0; 64];
+    const n = try toml_get_str(cfg[0..cfg.len], "package", "name", &mut buf);
+    assert(n == 9 && eq_slice_str(&buf, 0, n, "rizg-demo"));
+    assert(toml_get_i64(cfg[0..cfg.len], "package", "workers", 1) == 8);
+    assert(toml_get_bool(cfg[0..cfg.len], "package", "hardened", false));
+    assert(toml_get_i64(cfg[0..cfg.len], "net", "port", 80) == 8443);
+}
+
